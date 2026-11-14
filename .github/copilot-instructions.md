@@ -1,76 +1,93 @@
 # Copilot Instructions — NVIDIA NIM AutoRouter
 
-This repo is a Python/FastAPI gateway that classifies requests, selects one configured NVIDIA NIM model, and forwards OpenAI-compatible chat completions. It is currently a **policy router** (not yet an autonomous terminal agent — no shell execution, patch application, or tool loops).
+This repo is a headless local Python + FastAPI gateway that routes coding-agent requests to one configured NVIDIA NIM model. Backend is Python/FastAPI; database is PostgreSQL; provider is NVIDIA NIM; primary protocol is OpenAI-compatible Chat Completions. Client targets: OpenCode, Claude Code, Codex CLI, GitHub Copilot (BYOK surfaces), and other compatible agents. It is **not** an autonomous terminal agent — no shell execution, patch application, or tool loops.
 
-> The repository currently contains only `README.md` (single initial commit); the application source has not been committed yet. Treat `README.md` as the source of truth for setup and behavior. Update this file when source is added.
+Version: 0.2.0 (architecture baseline + starter scaffold). Most adapter endpoints are scaffolded placeholders returning 501; only `/health` and `/v1/models` are implemented.
 
-## Build, test, and run commands
+## Build, test, lint, and run commands
 
-Requirements: Python 3.11+, NVIDIA API key for `https://integrate.api.nvidia.com/v1`, and six model IDs confirmed in `config/models.yaml`.
+Requirements: Python 3.12+, PostgreSQL, NVIDIA API key for `https://integrate.api.nvidia.com/v1`.
 
 ```bash
-# Create and activate venv
-python -m venv .venv
-# Windows: .venv\Scripts\Activate.ps1
-# Linux/macOS: source .venv/bin/activate
-
-# Install the package (editable)
-pip install -e .
-
-# Configure environment
+# 1. Copy env template and set secrets
 cp .env.example .env
-# Set NVIDIA_API_KEY and a strong ROUTER_API_KEY in .env
+# Set NVIDIA_API_KEY, ROUTER_API_KEY, DATABASE_URL in .env
 
-# Run the server
-uvicorn app.main:app --host 127.0.0.1 --port 8080 --reload
+# 2. Start PostgreSQL (loopback only)
+docker compose up -d db
+
+# 3. Install backend (editable, with dev extras)
+pip install -e '.[dev]'
+
+# 4. Run the service
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# 5. Verify
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/v1/models -H "Authorization: Bearer change-me-local-router-key"
 ```
 
-Tests (dev extras required):
+Dev extras include `pytest`, `pytest-asyncio`, `ruff`, `mypy`.
+
 ```bash
-pip install -e ".[dev]"
-pytest -q
+# Full test suite
+pytest
 
 # Run a single test file
-pytest tests/test_router.py -q
+pytest tests/test_health.py
 
 # Run a single test by node id
-pytest tests/test_router.py::test_model_selection -q
+pytest tests/test_health.py::test_health
+
+# Lint
+ruff check .
+
+# Format check
+ruff format --check .
+
+# Type check
+mypy app
 ```
 
-Runtime verification (after starting the server):
+Docker:
 ```bash
-curl -X POST http://127.0.0.1:8080/v1/router/verify -H "X-Router-Key: change-this-local-gateway-key"
+docker build -t nim-autorouter:0.2.0 .
+docker run -p 127.0.0.1:8000:8000 --env-file .env nim-autorouter:0.2.0
 ```
-Calls NVIDIA's authenticated `GET /v1/models` and checks exact IDs.
 
-OpenAI-compatible request example:
+TypeScript SDK (consumer, not backend):
 ```bash
-curl http://127.0.0.1:8080/v1/chat/completions \
-  -H "Authorization: Bearer change-this-local-gateway-key" \
-  -H "X-Router-Key: change-this-local-gateway-key" \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Review this Python function for bugs"}]}'
+cd sdk/typescript
+npm install
+npm run build   # tsc -p tsconfig.json
 ```
 
 ## High-level architecture
 
-- **Entry point:** `app.main:app` (FastAPI application).
-- **Router mode:** receives a chat completion request, classifies it, selects one configured NIM model, and forwards the request. It does not execute shell commands, apply patches, or run tool loops.
-- **Configuration:** `config/models.yaml` holds six model IDs that must be confirmed against your authenticated NVIDIA catalog. NVIDIA's live catalog and the user's API-key entitlement are authoritative; public model cards do not guarantee inference support for a given key/account/region.
-- **Endpoints:**
-  - `POST /v1/chat/completions` — OpenAI-compatible chat completions. Clients point their OpenAI-compatible base URL at `http://127.0.0.1:8080/v1`; use the gateway key as the API key (and `X-Router-Key` header if the client requires it).
-  - `POST /v1/router/verify` — catalog presence check against NVIDIA `GET /v1/models` (not a live inference probe).
-  - `POST /v1/messages` — minimal non-streaming Anthropic Messages adapter (set `ANTHROPIC_BASE_URL=http://127.0.0.1:8080` and `ANTHROPIC_API_KEY` to the gateway key).
-- **Known limitations (documented, do not re-implement without discussion):**
-  - `stream=true` is not implemented as true SSE passthrough yet; use `stream: false`.
-  - The router does not forward tool definitions from client requests yet.
-  - No model fallback after inference failure, usage metering, persistence, adaptive policy, or dashboard yet.
-  - Not a verified OpenAI Responses API / Codex provider yet.
-- **Security:** Do not expose this gateway publicly without TLS, authentication, rate limiting, and network restrictions.
+- **Entry point:** `app.main:app` — FastAPI app with auth dependency (`check_auth`) on every non-health route.
+- **Request path:** Client → protocol adapter → normalized internal request → policy/classifier → model capability filter → model selection → NVIDIA NIM provider → normalized result → protocol serializer.
+- **Endpoints (all require `Authorization: Bearer <ROUTER_API_KEY>` except `/health`):**
+  - `GET /health` — status ok (no auth).
+  - `GET /v1/models` — returns empty model list; TODO: read enabled models from database-backed registry.
+  - `POST /v1/chat/completions` — scaffolded, returns 501 (Chat Completions adapter not yet implemented).
+  - `POST /v1/messages` — Anthropic Messages adapter placeholder, returns 501.
+  - `POST /v1/responses` — OpenAI Responses API adapter placeholder (for Codex CLI), returns 501.
+- **Configuration:** `app/config.py` uses `pydantic-settings` (`BaseSettings`) loading from `.env`. Key settings: `router_api_key`, `nvidia_api_key`, `nvidia_base_url`, `database_url`, `http_timeout_seconds`, `log_level`.
+- **Database:** `app/db.py` — SQLAlchemy 2.0 engine + `SessionLocal` + `DeclarativeBase`, `get_db()` dependency. No Alembic migrations or schema tables yet.
+- **Model registry:** `config/models.yaml` — six candidate models, all `enabled: false` with `verification: pending`. Keys: `laguna_xs_21`, `deepseek_v41_flash`, `minimax_m31_flash`, `nemotron_super_vl`, `nemotron_nano_omni`, `nemotron_bolt_e4b`.
+- **TypeScript SDK:** `sdk/typescript/src/client.ts` — wraps the official `openai` npm package pointed at `http://127.0.0.1:8000/v1`; requires `NIM_ROUTER_API_KEY`. Not the backend runtime.
+- **Protocol boundaries:** OpenCode → Chat Completions (first-class); Claude Code → Anthropic Messages adapter; Codex CLI → Responses API adapter (Chat Completions alone is insufficient); GitHub Copilot → BYOK/custom, surface-specific, requires targeted validation. Adapters must preserve tool calls, streaming events, usage, finish/stop reasons, and error semantics.
 
 ## Key conventions
 
-- Environment: copy `.env.example` to `.env` and set `NVIDIA_API_KEY` and a strong `ROUTER_API_KEY`. No credentials are bundled.
-- Model IDs were normalized from the supplied selection guide and NVIDIA public documentation; verify against your live catalog before relying on them.
-- Base URL for clients: `http://127.0.0.1:8080/v1`.
-- `stream=true` → not yet true SSE passthrough; prefer `stream: false`.
+- **Typed Pydantic schemas** for request/response bodies; no untyped dicts in route handlers.
+- **Async I/O** for provider calls (`httpx`).
+- **Inject DB sessions** via `get_db()` dependency; avoid business logic in route handlers.
+- **Centralize errors**; secure every non-health route with `check_auth` (Bearer `ROUTER_API_KEY`).
+- **Bind to loopback by default** (`127.0.0.1`); never expose publicly without TLS/auth/rate limiting/network restrictions.
+- **Never log secrets or full private prompts.**
+- **Versioned adapters** — one adapter per client wire protocol; do not pretend every client speaks the same protocol.
+- **Testing:** Mock external NIM in unit tests; live NIM tests are opt-in only. Do not label live model tests passed unless they ran against the user's authenticated endpoint. Test error paths, auth, rate limits, and streaming.
+- **Model safety:** A candidate model is not active until authenticated `/v1/models` discovery and per-model inference/capability tests pass. All six models are disabled pending verification — do not enable without runtime verification.
+- **Skills:** 12 project-specific `SKILL.md` files under `skills/` (8 core + 4 optional) define per-area mission, workflow, constraints, and verification checklists. Read the relevant skill file before working in that area.
+- **Docs:** `docs/ARCHITECTURE.md`, `docs/CLIENT_COMPATIBILITY.md`, `docs/ROADMAP.md`, `docs/STATUS.md` — read these for architecture decisions, client compat matrix, roadmap phases (P0–P5), and current implementation status.
