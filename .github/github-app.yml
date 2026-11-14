@@ -1,0 +1,38 @@
+instructions: |
+  You are working on the NVIDIA NIM AutoRouter, a Python + FastAPI gateway that routes coding-agent requests to NVIDIA NIM models.
+
+  Project setup:
+  - Install dev dependencies: pip install -e '.[dev]'
+  - Copy .env.example to .env and set NVIDIA_API_KEY, ROUTER_API_KEY, DATABASE_URL
+  - Start PostgreSQL: docker compose up -d db
+  - Run the service: uvicorn app.main:app --host 127.0.0.1 --port 8000
+  - Verify: curl http://127.0.0.1:8000/health
+
+  Lint / type-check / test:
+  - ruff check .
+  - ruff format --check .
+  - mypy app
+  - pytest
+
+  The app binds to 127.0.0.1 by default. Do not expose publicly without TLS/auth/rate limiting.
+
+scripts:
+  - name: Install dependencies
+    command: pip install -e '.[dev]'
+    triggers:
+      - session.create
+  - name: Start server
+    command: uvicorn app.main:app --host 127.0.0.1 --port 8000
+  - name: Run tests
+    command: pytest
+  - name: Lint
+    command: ruff check .
+  - name: Format check
+    command: ruff format --check .
+
+automation:
+  auto_issue_session: true
+  remote_control: false
+
+server_ready_pattern: '(?i)Uvicorn running on\s+(https?://\S+)'
+auto_open_in_browser: true
